@@ -1,139 +1,71 @@
-name: DevSecOps Autopilot
+# =============================================================================
+# AI DevSecOps Autopilot — Minimal Guaranteed Workflow
+# =============================================================================
+# STEP 1: Replace your current .github/workflows/autopilot.yml with this file
+#         on BOTH the main branch AND your PR branch (test-autopilot).
+#
+# CRITICAL RULES TO AVOID "no jobs":
+#   - "on:", "jobs:", and job keys MUST be at column 0 (no leading spaces)
+#   - Use spaces only, NEVER tabs
+#   - The file on the PR branch is what GitHub reads for push events
+#   - The merge-base version is what GitHub reads for pull_request events
+# =============================================================================
 
+name: AI DevSecOps Autopilot
+
+# --- Triggers ---
+# pull_request: fires when PR is opened/updated against main
+# No push trigger needed — pull_request is sufficient for PR checks.
+# Adding push with branch filters can cause the "no jobs" ghost runs.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-  push:
     branches:
       - main
-      - test-autopilot
 
+# --- Permissions ---
+# Explicitly set so the PR comment step can write to the pull request.
 permissions:
   contents: read
   pull-requests: write
 
+# --- Jobs ---
 jobs:
+  # =========================================================================
+  # Phase 1: Minimal smoke test — proves the workflow runs and posts a check.
+  # Once you see this green in PR Checks, we layer in gitleaks + trivy.
+  # =========================================================================
   autopilot:
-    name: autopilot
+    name: "DevSecOps Autopilot"
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run gitleaks (secrets)
-        id: gitleaks
-        continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
-        with:
-          args: >
-            detect
-            --no-git
-            --redact
-            --report-format json
-            --report-path gitleaks.json
-
-      - name: Run trivy (vulnerabilities)
-        id: trivy
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          scan-type: fs
-          format: json
-          output: trivy.json
-          severity: CRITICAL,HIGH,MEDIUM,LOW
-          ignore-unfixed: true
-
-      - name: Summarize results
-        id: summary
+      - name: Smoke test — prove the job runs
         run: |
-          set -e
-          echo "secrets_found=false" >> $GITHUB_OUTPUT
-          echo "high_or_critical=false" >> $GITHUB_OUTPUT
-          echo "secrets_count=0" >> $GITHUB_OUTPUT
-          echo "hc_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "============================================"
+          echo " Autopilot workflow is running!"
+          echo " Event:  ${{ github.event_name }}"
+          echo " Branch: ${{ github.head_ref }}"
+          echo " PR:     #${{ github.event.pull_request.number }}"
+          echo " SHA:    ${{ github.sha }}"
+          echo "============================================"
+          echo "If you see this, the 'no jobs' problem is fixed."
 
-          if [ -f gitleaks.json ]; then
-            SECRETS_COUNT=$(python - <<'PY'
-import json
-p="gitleaks.json"
-try:
-  data=json.load(open(p))
-  print(len(data) if isinstance(data, list) else 0)
-except Exception:
-  print(0)
-PY
-)
-            echo "secrets_count=$SECRETS_COUNT" >> $GITHUB_OUTPUT
-            if [ "$SECRETS_COUNT" -gt 0 ]; then
-              echo "secrets_found=true" >> $GITHUB_OUTPUT
-            fi
-          fi
-
-          if [ -f trivy.json ]; then
-            HC_COUNT=$(python - <<'PY'
-import json
-p="trivy.json"
-data=json.load(open(p))
-count=0
-for r in data.get("Results", []):
-  for v in (r.get("Vulnerabilities") or []):
-    if (v.get("Severity") or "").upper() in ("HIGH","CRITICAL"):
-      count += 1
-print(count)
-PY
-)
-            echo "hc_vuln_count=$HC_COUNT" >> $GITHUB_OUTPUT
-            if [ "$HC_COUNT" -gt 0 ]; then
-              echo "high_or_critical=true" >> $GITHUB_OUTPUT
-            fi
-          fi
-
-      - name: Create/Update ONE PR comment (no noise)
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/github-script@v7
-        env:
-          SECRETS_FOUND: ${{ steps.summary.outputs.secrets_found }}
-          HIGH_OR_CRITICAL: ${{ steps.summary.outputs.high_or_critical }}
-          SECRETS_COUNT: ${{ steps.summary.outputs.secrets_count }}
-          HC_VULN_COUNT: ${{ steps.summary.outputs.hc_vuln_count }}
+      - name: Post PR comment (proof of life)
+        uses: marocchino/sticky-pull-request-comment@v2
         with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const issue_number = context.issue.number;
+          header: devsecops-autopilot
+          message: |
+            ## 🛡️ DevSecOps Autopilot — Smoke Test
 
-            const marker = "<!-- autopilot-report -->";
-            const secretsFound = process.env.SECRETS_FOUND === "true";
-            const highOrCritical = process.env.HIGH_OR_CRITICAL === "true";
-            const secretsCount = Number(process.env.SECRETS_COUNT || 0);
-            const hcVulnCount = Number(process.env.HC_VULN_COUNT || 0);
+            ✅ **Workflow executed successfully!**
 
-            const status = (secretsFound || highOrCritical) ? "❌ Blocked" : "✅ Clear";
-            const headline = `## DevSecOps Autopilot Report ${status}`;
+            | Detail | Value |
+            |--------|-------|
+            | Event | `${{ github.event_name }}` |
+            | Branch | `${{ github.head_ref }}` |
+            | Commit | `${{ github.sha }}` |
 
-            const bullets = [
-              `- **Secrets (gitleaks):** ${secretsFound ? `❌ ${secretsCount} finding(s)` : "✅ none found"}`,
-              `- **Vulnerabilities (trivy):** ${highOrCritical ? `❌ ${hcVulnCount} HIGH/CRITICAL` : "✅ no HIGH/CRITICAL"}`
-            ].join("\n");
-
-            const guidance = (secretsFound || highOrCritical)
-              ? "\n### What to do next\n- Remove secrets / rotate keys\n- Patch or upgrade vulnerable deps\n- Push a fix commit — Autopilot will re-run and update this comment."
-              : "\n### Next\n- Looks good. Safe to merge from a security standpoint.";
-
-            const body = `${marker}\n${headline}\n\n${bullets}\n${guidance}\n\n<sub>Autopilot updates this single comment on every PR update to avoid noise.</sub>`;
-
-            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
-            const existing = comments.find(c => c.body && c.body.includes(marker));
-
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
-      - name: Gate merge (fail job if blocked)
-        if: ${{ steps.summary.outputs.secrets_found == 'true' || steps.summary.outputs.high_or_critical == 'true' }}
-        run: |
-          echo "Autopilot blocked due to secrets and/or HIGH/CRITICAL vulnerabilities."
-          exit 1
+            > This comment will be replaced with real scan results once gitleaks + trivy are added.
