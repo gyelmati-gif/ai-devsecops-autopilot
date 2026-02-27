@@ -14,13 +14,13 @@ permissions:
 
 jobs:
   autopilot:
+    name: autopilot
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Secret scanning (Gitleaks) ---
       - name: Run gitleaks (secrets)
         id: gitleaks
         continue-on-error: true
@@ -33,7 +33,6 @@ jobs:
             --report-format json
             --report-path gitleaks.json
 
-      # --- Dependency / filesystem vuln scanning (Trivy) ---
       - name: Run trivy (vulnerabilities)
         id: trivy
         continue-on-error: true
@@ -49,26 +48,18 @@ jobs:
         id: summary
         run: |
           set -e
-
-          # Defaults
           echo "secrets_found=false" >> $GITHUB_OUTPUT
           echo "high_or_critical=false" >> $GITHUB_OUTPUT
           echo "secrets_count=0" >> $GITHUB_OUTPUT
           echo "hc_vuln_count=0" >> $GITHUB_OUTPUT
 
-          # Gitleaks count
           if [ -f gitleaks.json ]; then
             SECRETS_COUNT=$(python - <<'PY'
-import json,sys
+import json
 p="gitleaks.json"
 try:
   data=json.load(open(p))
-  # gitleaks may output a list of findings
-  if isinstance(data, list):
-    print(len(data))
-  else:
-    # fallback
-    print(0)
+  print(len(data) if isinstance(data, list) else 0)
 except Exception:
   print(0)
 PY
@@ -79,7 +70,6 @@ PY
             fi
           fi
 
-          # Trivy HIGH/CRITICAL vuln count
           if [ -f trivy.json ]; then
             HC_COUNT=$(python - <<'PY'
 import json
@@ -87,9 +77,8 @@ p="trivy.json"
 data=json.load(open(p))
 count=0
 for r in data.get("Results", []):
-  for v in r.get("Vulnerabilities", []) or []:
-    sev=(v.get("Severity") or "").upper()
-    if sev in ("HIGH","CRITICAL"):
+  for v in (r.get("Vulnerabilities") or []):
+    if (v.get("Severity") or "").upper() in ("HIGH","CRITICAL"):
       count += 1
 print(count)
 PY
@@ -101,6 +90,7 @@ PY
           fi
 
       - name: Create/Update ONE PR comment (no noise)
+        if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         env:
           SECRETS_FOUND: ${{ steps.summary.outputs.secrets_found }}
@@ -145,6 +135,5 @@ PY
       - name: Gate merge (fail job if blocked)
         if: ${{ steps.summary.outputs.secrets_found == 'true' || steps.summary.outputs.high_or_critical == 'true' }}
         run: |
-          echo "Autopilot blocked this PR due to secrets and/or HIGH/CRITICAL vulnerabilities."
+          echo "Autopilot blocked due to secrets and/or HIGH/CRITICAL vulnerabilities."
           exit 1
-          
