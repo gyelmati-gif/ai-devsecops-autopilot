@@ -1,39 +1,15 @@
-# =============================================================================
-# AI DevSecOps Autopilot — Minimal Guaranteed Workflow
-# =============================================================================
-# STEP 1: Replace your current .github/workflows/autopilot.yml with this file
-#         on BOTH the main branch AND your PR branch (test-autopilot).
-#
-# CRITICAL RULES TO AVOID "no jobs":
-#   - "on:", "jobs:", and job keys MUST be at column 0 (no leading spaces)
-#   - Use spaces only, NEVER tabs
-#   - The file on the PR branch is what GitHub reads for push events
-#   - The merge-base version is what GitHub reads for pull_request events
-# =============================================================================
-
 name: AI DevSecOps Autopilot
 
-# --- Triggers ---
-# pull_request: fires when PR is opened/updated against main
-# No push trigger needed — pull_request is sufficient for PR checks.
-# Adding push with branch filters can cause the "no jobs" ghost runs.
 on:
   pull_request:
     branches:
       - main
 
-# --- Permissions ---
-# Explicitly set so the PR comment step can write to the pull request.
 permissions:
   contents: read
   pull-requests: write
 
-# --- Jobs ---
 jobs:
-  # =========================================================================
-  # Phase 1: Minimal smoke test — proves the workflow runs and posts a check.
-  # Once you see this green in PR Checks, we layer in gitleaks + trivy.
-  # =========================================================================
   autopilot:
     name: "DevSecOps Autopilot"
     runs-on: ubuntu-latest
@@ -41,31 +17,110 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Smoke test — prove the job runs
+      - name: Run Gitleaks
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Capture Gitleaks result
+        id: gitleaks_result
         run: |
-          echo "============================================"
-          echo " Autopilot workflow is running!"
-          echo " Event:  ${{ github.event_name }}"
-          echo " Branch: ${{ github.head_ref }}"
-          echo " PR:     #${{ github.event.pull_request.number }}"
-          echo " SHA:    ${{ github.sha }}"
-          echo "============================================"
-          echo "If you see this, the 'no jobs' problem is fixed."
+          if [ "${{ steps.gitleaks.outcome }}" = "failure" ]; then
+            echo "status=FAIL" >> "$GITHUB_OUTPUT"
+            echo "emoji=🔴" >> "$GITHUB_OUTPUT"
+            echo "summary=**Secrets detected!** Review gitleaks output above." >> "$GITHUB_OUTPUT"
+          else
+            echo "status=PASS" >> "$GITHUB_OUTPUT"
+            echo "emoji=🟢" >> "$GITHUB_OUTPUT"
+            echo "summary=No secrets found." >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Post PR comment (proof of life)
+      - name: Run Trivy filesystem scan
+        id: trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
+          output: trivy-results.txt
+          exit-code: "1"
+
+      - name: Capture Trivy result
+        id: trivy_result
+        run: |
+          if [ "${{ steps.trivy.outcome }}" = "failure" ]; then
+            echo "status=FAIL" >> "$GITHUB_OUTPUT"
+            echo "emoji=🔴" >> "$GITHUB_OUTPUT"
+            echo "summary=**HIGH/CRITICAL vulnerabilities found!**" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=PASS" >> "$GITHUB_OUTPUT"
+            echo "emoji=🟢" >> "$GITHUB_OUTPUT"
+            echo "summary=No HIGH/CRITICAL vulnerabilities." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read Trivy output
+        id: trivy_output
+        run: |
+          if [ -f trivy-results.txt ] && [ -s trivy-results.txt ]; then
+            {
+              echo "table<<TRIVY_EOF"
+              head -100 trivy-results.txt
+              echo "TRIVY_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "table=_No vulnerability table generated (clean scan)._" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post PR summary comment
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: devsecops-autopilot
           message: |
-            ## 🛡️ DevSecOps Autopilot — Smoke Test
+            ## 🛡️ DevSecOps Autopilot — Scan Results
 
-            ✅ **Workflow executed successfully!**
+            | Check | Status | Details |
+            |-------|--------|---------|
+            | **Gitleaks** (secrets) | ${{ steps.gitleaks_result.outputs.emoji }} ${{ steps.gitleaks_result.outputs.status }} | ${{ steps.gitleaks_result.outputs.summary }} |
+            | **Trivy** (vulnerabilities) | ${{ steps.trivy_result.outputs.emoji }} ${{ steps.trivy_result.outputs.status }} | ${{ steps.trivy_result.outputs.summary }} |
 
-            | Detail | Value |
-            |--------|-------|
-            | Event | `${{ github.event_name }}` |
-            | Branch | `${{ github.head_ref }}` |
-            | Commit | `${{ github.sha }}` |
+            <details>
+            <summary>📋 Trivy scan details (click to expand)</summary>
+```
+            ${{ steps.trivy_output.outputs.table }}
+```
 
-            > This comment will be replaced with real scan results once gitleaks + trivy are added.
+            </details>
+
+            ---
+            🤖 _Autopilot ran on commit `${{ github.sha }}` · [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_
+
+      - name: Merge gate
+        run: |
+          FAILED=0
+
+          if [ "${{ steps.gitleaks_result.outputs.status }}" = "FAIL" ]; then
+            echo "::error::Gitleaks found secrets in the codebase!"
+            FAILED=1
+          fi
+
+          if [ "${{ steps.trivy_result.outputs.status }}" = "FAIL" ]; then
+            echo "::error::Trivy found HIGH/CRITICAL vulnerabilities!"
+            FAILED=1
+          fi
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "============================================"
+            echo " MERGE BLOCKED — Fix the issues above."
+            echo "============================================"
+            exit 1
+          fi
+
+          echo "All checks passed. Safe to merge."
