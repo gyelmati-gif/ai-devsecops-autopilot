@@ -1,0 +1,8 @@
+title = "Gitleaks config"
+
+[allowlist]
+  description = "Allow known safe patterns"
+  paths = [
+    '''\.github/workflows/.*\.yml$''',
+    '''README\.md$'''
+  ]
